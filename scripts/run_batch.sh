@@ -10,19 +10,22 @@
 #   TS_PY       python with truckscenes-devkit                     [python]
 #   SEGFORMER   SegFormer checkout                                 [~/gs/SegFormer]
 #   OUT_ROOT    training output root                               [~/gs/out/drivestudio]
+#   TIMELINE    camera (frame times = real camera capture times) | uniform (v1)   [camera]
+#   DATA        processed-data folder, relative to DS              [data/truckscenes/processed_<TIMELINE>/mini]
+#   TAG         suffix of the run name                             [empty]
 source ${CONDA_SH:-~/miniforge3/etc/profile.d/conda.sh}
 [ -d /usr/lib/wsl/lib ] && export LD_LIBRARY_PATH=/usr/lib/wsl/lib   # WSL: CUDA driver libs
 DS=${DS:-~/gs/drivestudio}; TS_ROOT=${TS_ROOT:-~/gs/data/truckscenes/man-truckscenes}; TS_PY=${TS_PY:-python}
 SEGFORMER=${SEGFORMER:-~/gs/SegFormer}; OUT_ROOT=${OUT_ROOT:-~/gs/out/drivestudio}
 export PYTHONPATH=$DS
-DATA=data/truckscenes/processed_10Hz/mini
+TIMELINE=${TIMELINE:-camera}; DATA=${DATA:-data/truckscenes/processed_$TIMELINE/mini}; TAG=${TAG:-}
 LOG=$OUT_ROOT/truckscenes/logs; mkdir -p $LOG
 say() { echo "$(date +%T) $*" | tee -a $LOG/progress.txt; }
 
 for S in "$@"; do
   P=$(printf "%03d" $S); cd $DS
   say "scene $S: preprocess"
-  [ -d $DATA/$P/lidar ] || $TS_PY datasets/truckscenes/truckscenes_preprocess.py --root $TS_ROOT --out $DATA --scenes $S \
+  [ -d $DATA/$P/lidar ] || $TS_PY datasets/truckscenes/truckscenes_preprocess.py --root $TS_ROOT --out $DATA --scenes $S --timeline $TIMELINE \
       > $LOG/prep_$P.log 2>&1 || { say "scene $S: PREPROCESS FAILED"; continue; }
 
   say "scene $S: masks"
@@ -39,7 +42,7 @@ for S in "$@"; do
   # render_full / render_novel are off: they keep every rendered frame in RAM (a 392-frame highway scene
   # exhausted 6 GB RAM + 8 GB swap). Test metrics and test-set videos are still produced.
   python tools/train.py --config_file configs/streetgs.yaml --output_root $OUT_ROOT --project truckscenes \
-      --run_name streetgs_2cams_s$S dataset=truckscenes/2cams data.scene_idx=$S data.pixel_source.test_image_stride=8 \
+      --run_name streetgs_2cams_s$S$TAG dataset=truckscenes/2cams data.data_root=$DATA data.scene_idx=$S data.pixel_source.test_image_stride=8 \
       render.render_full=False render.render_novel=null \
       > $LOG/train_$P.log 2>&1 && say "scene $S: DONE" || say "scene $S: TRAIN FAILED"
   conda deactivate

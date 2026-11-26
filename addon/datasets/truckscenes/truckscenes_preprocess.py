@@ -61,7 +61,9 @@ def main():
     ap.add_argument("--root", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--version", default="v1.2-mini")
     ap.add_argument("--scenes", default="2", help="comma-separated indices into scene.json (folder name = index)")
-    ap.add_argument("--interpolate_N", type=int, default=4, help="frames inserted between 2 Hz keyframes (4 -> 10 Hz)")
+    ap.add_argument("--timeline", default="camera", choices=["camera", "uniform"],
+                    help="camera: frame times = real capture times of camera 0; uniform: evenly spaced (v1 behaviour)")
+    ap.add_argument("--interpolate_N", type=int, default=4, help="uniform timeline: frames inserted between 2 Hz keyframes")
     ap.add_argument("--max_range", type=float, default=120.0)
     a = ap.parse_args()
     root, outroot = os.path.expanduser(a.root), os.path.expanduser(a.out)
@@ -89,9 +91,17 @@ def main():
                 sds.setdefault(cal[x["calibrated_sensor_token"]]["channel"], []).append(x)
         for v in sds.values(): v.sort(key=lambda x: x["timestamp"])
 
-        # ---- 10 Hz timeline: keyframe timestamps with N evenly spaced ones in between
+        # ---- 10 Hz timeline
+        #  camera  (default): the real capture times of camera 0. The cameras are hardware-synchronised (< 3 ms
+        #          apart) and run at 10 Hz, so images, camera poses AND interpolated boxes all refer to the same instant.
+        #  uniform (v1): keyframe timestamps with N evenly spaced ones in between. Images are then picked as the
+        #          closest capture, which can be tens of ms (up to one frame) away from the instant the boxes are
+        #          interpolated at -> fast vehicles are rendered at a shifted position.
         kts = [s["timestamp"] for s in keys]; N = a.interpolate_N
-        ts = [int(kts[i] + j * (kts[i + 1] - kts[i]) / (N + 1)) for i in range(len(kts) - 1) for j in range(N + 1)] + [kts[-1]]
+        if a.timeline == "camera":
+            ts = sorted(x["timestamp"] for x in sds[CAMS[0]] if kts[0] - 50_000 <= x["timestamp"] <= kts[-1] + 50_000)
+        else:
+            ts = [int(kts[i] + j * (kts[i + 1] - kts[i]) / (N + 1)) for i in range(len(kts) - 1) for j in range(N + 1)] + [kts[-1]]
         ts = np.array(ts, np.int64); F = len(ts)
         closest = lambda ch: [sds[ch][int(np.argmin(np.abs(np.array([x["timestamp"] for x in sds[ch]]) - t)))] for t in ts]
         world_T_ego = lambda x: se3(pose[x["ego_pose_token"]]["rotation"], pose[x["ego_pose_token"]]["translation"])
@@ -131,26 +141,29 @@ def main():
             np.savetxt(f"{out}/lidar_pose/{fi:03d}.txt", world_T_ego(ref))
         print(f"LiDAR: {np.mean(npts):,.0f} points per frame (6 sensors, own truck removed)", flush=True)
 
-        # ---- objects: keyframe boxes -> interpolated 10 Hz tracks
+        # ---- objects: 2 Hz keyframe boxes -> tracks interpolated at every frame's timestamp
+        #      (position: linear, rotation: Slerp, size: linear; a frame up to 50 ms outside the annotated span
+        #       gets the nearest annotated box)
         by_inst = {}
         for b in all_ann:
             if b["sample_token"] in toks and inst_cat[b["instance_token"]] in DYNAMIC:
-                kf = kts.index(samples[b["sample_token"]]["timestamp"])
-                by_inst.setdefault(b["instance_token"], []).append((kf, b))
+                by_inst.setdefault(b["instance_token"], []).append((samples[b["sample_token"]]["timestamp"], b))
         skipped = sorted({inst_cat[b["instance_token"]] for b in all_ann if b["sample_token"] in toks} - set(DYNAMIC))
         instances_info, frame_instances = {}, {fi: [] for fi in range(F)}
         for oid, (tok, v) in enumerate(by_inst.items()):
             v.sort(key=lambda z: z[0])
-            kf = [k * (N + 1) for k, _ in v]
+            kt = np.array([t for t, _ in v], np.float64)
             Rs = Rot.from_quat([[b["rotation"][1], b["rotation"][2], b["rotation"][3], b["rotation"][0]] for _, b in v])
             tr = np.array([b["translation"] for _, b in v]); lwh = np.array([[b["size"][1], b["size"][0], b["size"][2]] for _, b in v])
-            frames = list(range(kf[0], kf[-1] + 1))
-            rot = Slerp(kf, Rs)(frames) if len(kf) > 1 else Rot.from_quat(np.repeat(Rs.as_quat(), len(frames), 0))
+            frames = [f for f in range(F) if kt[0] - 50_000 <= ts[f] <= kt[-1] + 50_000]
+            if len(kt) == 1: frames = [int(np.argmin(np.abs(ts - kt[0])))]  # single annotation: its nearest frame
+            tq = np.clip(ts[frames].astype(np.float64), kt[0], kt[-1])
+            rot = Slerp(kt, Rs)(tq) if len(kt) > 1 else Rot.from_quat(np.repeat(Rs.as_quat(), len(frames), 0))
             o2w = []
             for i, f in enumerate(frames):
-                T = np.eye(4); T[:3, :3] = rot[i].as_matrix(); T[:3, 3] = [np.interp(f, kf, tr[:, j]) for j in range(3)]
+                T = np.eye(4); T[:3, :3] = rot[i].as_matrix(); T[:3, 3] = [np.interp(tq[i], kt, tr[:, j]) for j in range(3)]
                 o2w.append(T.tolist())
-            sizes = [[float(np.interp(f, kf, lwh[:, j])) for j in range(3)] for f in frames]
+            sizes = [[float(np.interp(tq[i], kt, lwh[:, j])) for j in range(3)] for i in range(len(frames))]
             instances_info[oid] = dict(id=tok, class_name=inst_cat[tok],
                                        frame_annotations=dict(frame_idx=frames, obj_to_world=o2w, box_size=sizes))
             for f in frames: frame_instances[f].append(oid)
