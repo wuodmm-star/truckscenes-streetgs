@@ -1,0 +1,40 @@
+# MAN TruckScenes configuration (processed by datasets/truckscenes/truckscenes_preprocess.py)
+# Processed cameras:
+#   idx    camera               original size
+#    0    CAMERA_LEFT_FRONT    (943, 1980)
+#    1    CAMERA_RIGHT_FRONT   (943, 1980)
+#    2    CAMERA_LEFT_BACK     (943, 1980)
+#    3    CAMERA_RIGHT_BACK    (943, 1980)
+# downscale 3 -> 660x314 (fits an 8 GB laptop GPU, RTX 4060)
+
+data:
+  data_root: data/truckscenes/processed_10Hz/mini # data root for the dataset
+  dataset: truckscenes # dataset type
+  scene_idx: 2 # index into the mini split's scene.json (2 = scene-23160c4b...-14, city/bridge)
+  start_timestep: 0 # which timestep to start from
+  end_timestep: -1 # which timestep to end at, -1 means the last timestep
+  preload_device: cpu # choose from ["cpu", "cuda"], cache the data on this device
+  pixel_source: # image source and object annotations
+    type: datasets.truckscenes.truckscenes_sourceloader.TruckScenesPixelSource
+    cameras: [0, 1, 2, 3] # which cameras to use
+    downscale_when_loading: [3, 3, 3, 3] # the size of the images to load
+    downscale: 1 # downscale factor wrt to the downscale_when_loading
+    undistort: False # TruckScenes images are already undistorted
+    test_image_stride: 0 # use every Nth timestep for the test set. if 0, use all images for training and none for testing
+    load_sky_mask: True # whether to load sky mask
+    load_dynamic_mask: True # whether to load dynamic mask
+    load_objects: True # whether to load object bounding boxes
+    load_smpl: False # no SMPL pose estimation for TruckScenes (Street Gaussians does not need it)
+    sampler: # error based image sampler
+      buffer_downscale: 8 # downscale factor for the buffer wrt load_size
+      buffer_ratio: 0.5 # the percentage of images sampled according to the error buffer
+      start_enhance_weight: 3 # give more chance to sample starting frames, which usually have more errors
+  lidar_source: # everything related to "lidar" --- from lidar points
+    type: datasets.truckscenes.truckscenes_sourceloader.TruckScenesLiDARSource
+    load_lidar: True # whether to load lidar
+    # ---- compute aabb from lidar ---- #
+    # if load_lidar is True, we compute aabb from lidar, otherwise we compute aabb from cameras
+    # 1) downsample lidar by random sampling to 1/lidar_downsample_factor number of points
+    # 2) compute aabb from the downsampled lidar points by using the percentile of lidar_percentiles 
+    lidar_downsample_factor: 4 # downsample lidar by this factor to compute percentile
+    lidar_percentile: 0.02  # percentile to compute aabb from lidar
